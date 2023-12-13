@@ -3,15 +3,15 @@ library(tidyverse)
 ```
 
 ```{r}
-diversity <- read.csv("logs/diversity_0.csv")
+diversity <- read.csv("logs/diversity_2.csv")
 colnames(diversity) <- c("generation", "diversity")
-fitness <- read.csv("logs/fitness_0.csv")
+fitness <- read.csv("logs/fitness_2.csv")
 colnames(fitness) <- c("generation", "fitness")
 ```
 
 
 ```{r}
-truncated_diversity <- diversity %>% filter(generation > 300)
+truncated_diversity <- diversity %>% filter(generation > 100)
 ggplot(truncated_diversity, aes(x = generation, y = diversity)) + geom_line() + scale_y_continuous(trans='log10')
 ```
 

@@ -7,7 +7,7 @@ import random
 import argparse
 import networkx as nx
 
-from threading import Condition, Barrier
+from threading import Condition, Barrier, Lock
 from opfunu.cec_based.cec2014 import F92014
 from deap import base, tools
 
@@ -41,82 +41,132 @@ class Individual(list):
         self.fitness = FitnessMin()
 
 
-class Topology:
-    def __init__(self, graph):
-        self.graph = graph
-
-    def neighbors(self, island):
-        return [ray.get_actor(str(i)) for i in self.graph.neighbors(island.index)]
-
-    def neighbors_count(self, island):
-        return len(self.graph[island.index])
-
-    def send_to_neighbors(self, island, emigrants):
-        neighbors = self.neighbors(island)
-        for n in neighbors:
-            n.send.remote(emigrants)
-
-
-class MaxDistanceTopology(Topology):
-    def __init__(self, islands):
-        super().__init__(nx.complete_graph(islands))
-        self.islands = islands
-
-    def neighbors(self, island):
-        neighbors = [ray.get_actor(str(i)) for i in self.graph.neighbors(island.index)]
-        populations = ray.get([n.get_population.remote() for n in neighbors])
-        distances = [get_distance_between_pop(island.get_population(), p) for p in populations]
-        with_neighbors = sorted(zip(distances, neighbors), key=lambda x: x[0], reverse=True)
-        return [with_neighbors[0][1]]
-
-    def neighbors_count(self, island):
-        return 1
-
-
-class MaxDistanceMatchingTopology(Topology):
-    def __init__(self, islands):
-        super().__init__(nx.complete_graph(islands))
-
-    def neighbors(self, island):
-        indices = list(self.graph.neighbors(island.index))
-        neighbors = [ray.get_actor(str(i)) for i in indices]
-        populations = ray.get([n.get_population.remote() for n in neighbors])
-        zipped = zip(indices, populations)
-        pop_dict = {el[0]: el[1] for el in zipped}
-        pop_dict[island.index] = island.get_population()
-
-        indices.append(island.index)
-        for i in indices:
-            for j in indices:
-                if i < j: self.graph[i][j]['weight'] = get_distance_between_pop(pop_dict[i], pop_dict[j])
-
-        matching = nx.max_weight_matching(self.graph)
-        edge = list(filter(lambda x: x[0] == island.index or x[1] == island.index, matching))[0]
-        neighbor_index = edge[0] if edge[1] == island.index else edge[1]
-
-        return [ray.get_actor(str(neighbor_index))]
-
-    def neighbors_count(self, island):
-        return 1
-
-
 @ray.remote
 class Synchronizer:
     def __init__(self, islands):
         self.barrier = Barrier(islands)
 
     def wait(self):
-        self.barrier.wait(timeout=10)
+        self.barrier.wait(timeout=60)
+
+
+class Topology:
+    def get_graph(self):
+        pass
+    
+    def neighbors(self, island_index):
+        return [ray.get_actor(str(i)) for i in self.get_graph().neighbors(island_index)]
+    
+    def send_to_neighbors(self, island_index, emigrants):
+        neighbors = self.neighbors(island_index)
+        for n in neighbors:
+            n.send.remote(emigrants)
+            
+    def indegree(self, island_index):
+        graph = self.get_graph()
+        if nx.is_directed(graph):
+            return len(list(graph.predecessors(island_index)))
+        else:
+            return len(list(graph.neighbors(island_index)))
+    
+
+class StaticTopology(Topology):
+    def __init__(self, graph):
+        self.graph = graph
+        
+    def get_graph(self):
+        return self.graph
+
+
+class MaxDistanceMatchingTopology(Topology):
+    def __init__(self, islands):
+        self.islands = islands
+        
+    def get_graph(self):
+        indices = list(range(self.islands))
+        neighbors = [ray.get_actor(str(i)) for i in indices]
+        populations = ray.get([n.get_population.remote() for n in neighbors])
+        zipped = zip(indices, populations)
+        pop_dict = {el[0]: el[1] for el in zipped}
+
+        graph = nx.complete_graph(self.islands)
+        joined_indices = [(i, j) for i in indices for j in indices if i < j]
+        distances = ray.get([get_distance_between_pop.remote(pop_dict[x[0]], pop_dict[x[1]]) for x in joined_indices])
+        for index in range(len(joined_indices)):
+            i, j = joined_indices[index]
+            graph[i][j]['weight'] = distances[index]
+
+        matching = nx.max_weight_matching(graph)
+
+        return nx.from_edgelist(matching)
+
+    def indegree(self, island_index):
+        return 1
+
+
+@ray.remote
+class RemoteTopologyCache:
+    # cached_topology should be a dynamic topology, like MaxDistanceMatchingTopology
+    def __init__(self, cached_topology):
+        self.cached_topology = cached_topology
+        self.lock = Lock()
+        self.topology_cache = {}
+        
+    def get_cached_topology(self, generation):
+        self.lock.acquire(timeout=10)
+        try:
+            if generation not in self.topology_cache:
+                self.topology_cache[generation] = StaticTopology(self.cached_topology.get_graph())
+            return self.topology_cache[generation]
+        finally:
+            self.lock.release()
+
+
+class MigrationPolicy:
+    def __init__(self, topology, migration_size, migration_interval, select_emigrants, accept_imigrants, synchronizer=None, cached=False):
+        self.migration_size = migration_size
+        self.migration_interval = migration_interval
+        self.select_emigrants = select_emigrants
+        self.accept_imigrants = accept_imigrants
+        if synchronizer is not None:
+            self.synchronizer = synchronizer
+            self.synchronized = True
+        else:
+            self.synchronized = False
+        if cached and not self.synchronized:
+            raise Exception("Cannot cache topology in non-synchronized model")
+        if cached:
+            self.topology_cache = RemoteTopologyCache.remote(topology)
+            self.get_topology = lambda generation: ray.get(self.topology_cache.get_cached_topology.remote(generation))
+        else:
+            self.get_topology = lambda generation: topology
+            
+    def send_emigrants(self, island, population, generation):
+        if generation < self.migration_interval or generation % self.migration_interval != 0:
+            return
+        if self.synchronized:
+            ray.get(self.synchronizer.wait.remote())
+        emigrants = self.select_emigrants(population, self.migration_size)
+        self.get_topology(generation).send_to_neighbors(island.index, emigrants)
+        
+    def receive_imigrants(self, island, population, generation):
+        if self.synchronized and generation >= self.migration_interval and generation % self.migration_interval == 0:
+            received = island.receive_sync(self.get_topology(generation).indegree(island.index))
+            for imigrants in received:
+                self.accept_imigrants(population, imigrants)
+        elif not self.synchronized:
+            received = island.receive_async()
+            for imigrants in received:
+                self.accept_imigrants(population, imigrants)
 
 
 @ray.remote
 class Island:
-    def __init__(self, toolbox, topology, index, synchronizer):
-        self.toolbox = toolbox
-        self.logger = Logger(index)
-        self.topology = topology
+    def __init__(self, index, toolbox, migration_policy):
         self.index = index
-        self.synchronizer = synchronizer
+        self.toolbox = toolbox
+        self.migration_policy = migration_policy
+        self.logger = Logger(index)
         self.queue = queue.Queue()
         self.cv = Condition()
 
@@ -193,21 +243,8 @@ class Island:
             self.logger.log_fitness(g, best_fitness)
 
             # Perform migration
-            if g >= migration_interval and g % migration_interval == 0:
-                # Synchronize with other islands:
-                ray.get(self.synchronizer.wait.remote())
-                # Send emigrants
-                emigrants = toolbox.select_emigrants(pop)
-                self.topology.send_to_neighbors(self, emigrants)
-                # Receive imigrants
-                received = self.receive_sync(self.topology.neighbors_count(self))
-                for imigrants in received:
-                    toolbox.accept_imigrants(pop, imigrants)
-
-            # Receive imigrants
-            received = self.receive_async()
-            for imigrants in received:
-                toolbox.accept_imigrants(pop, imigrants)
+            migration_policy.send_emigrants(self, pop, g)
+            migration_policy.receive_imigrants(self, pop, g)
 
             if len(pop) != 100:
                 raise Exception("Missing individuals")
@@ -294,6 +331,7 @@ def substitute_random_individuals(population, imigrants):
     population.extend(imigrants)
 
 
+@ray.remote
 def get_distance_between_pop(population1, population2):
     joined = population1 + population2
     return get_l1_diversity(joined) - get_l1_diversity(population1) - get_l1_diversity(population2)
@@ -314,7 +352,7 @@ if __name__ == "__main__":
     IND_SIZE = 100
     POP_SIZE = 100
     GENERATIONS = 500
-    NUM_OF_ISLANDS = 8
+    NUM_OF_ISLANDS = 32
     NUM_OF_MIGRANTS = 5
     MIGRATION_INTERVAL = 50
 
@@ -334,17 +372,16 @@ if __name__ == "__main__":
     toolbox.register("evaluate", evaluate, func=F92014(IND_SIZE))
     toolbox.register("diversity", get_l1_diversity)
 
-    toolbox.register("select_emigrants", select_best_individuals, n=NUM_OF_MIGRANTS)
-    toolbox.register("accept_imigrants", substitute_worst_individuals)
-
     start_time = time.time()
 
-    graph = nx.hypercube_graph(3)
+    graph = nx.hypercube_graph(5)
     graph = nx.convert_node_labels_to_integers(graph)
-    topology = Topology(graph)
+    topology = MaxDistanceMatchingTopology(NUM_OF_ISLANDS)
+    #topology = StaticTopology(graph)
     synchronizer = Synchronizer.options(max_concurrency=NUM_OF_ISLANDS).remote(NUM_OF_ISLANDS)
-    islands = [Island.options(name=str(i), max_concurrency=2).remote(toolbox, topology, i, synchronizer) for i in
-               range(NUM_OF_ISLANDS)]
+    migration_policy = MigrationPolicy(topology, NUM_OF_MIGRANTS, MIGRATION_INTERVAL, select_best_individuals, substitute_worst_individuals, synchronizer=synchronizer, cached=True)
+    
+    islands = [Island.options(name=str(index), max_concurrency=2).remote(index, toolbox, migration_policy) for index in range(NUM_OF_ISLANDS)]
     solutions = ray.get([island.run.remote(GENERATIONS, MIGRATION_INTERVAL) for island in islands])
     end_time = time.time()
 
