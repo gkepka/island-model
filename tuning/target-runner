@@ -25,8 +25,7 @@ error() {
 CONFIG_ID=$1
 INSTANCE_ID=$2
 SEED=$3
-INSTANCE=$4
-shift 4 || error "Not enough parameters"
+shift 3 || error "Not enough parameters"
 CONFIG_PARAMS=$*
 # End of parsing
 

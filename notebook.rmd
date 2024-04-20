@@ -3,10 +3,28 @@ library(tidyverse)
 ```
 
 ```{r}
-diversity <- read.csv("logs/diversity_2.csv")
+diversity <- read.csv("logs/diversity_0.csv")
 colnames(diversity) <- c("generation", "diversity")
-fitness <- read.csv("logs/fitness_2.csv")
+fitness <- read.csv("logs/fitness_0.csv")
 colnames(fitness) <- c("generation", "fitness")
+population <- read.csv("logs/population_0.csv")
+colnames(population) <- c("generation", "individual", "gene_index", "gene_value")
+```
+
+```{r}
+first_gene <- population$gene_value[population$generation == 50 & population$gene_index == 0]
+hist(first_gene, breaks=19)
+shapiro.test(first_gene)
+```
+
+```{r}
+library("entropy")
+```
+
+```{r}
+first_gene
+z = discretize(first_gene, numBins = 20)
+entropy(z)
 ```
 
 
