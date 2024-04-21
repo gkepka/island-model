@@ -59,4 +59,12 @@ for ((i = 1; i <= worker_num; i++)); do
     sleep 5
 done
 
-python -u src/main.py -f F92014 -m 0.01 -s 1 -c blend -a 0.5 -k 5
+if [ -n "$1" ]; then
+    module add r/4.2.0-foss-2021b
+    R --no-save < tuning.R
+else
+    python -u src/main.py -f F92014 -m 0.01 -s 1 -c blend -a 0.5 -k 5
+fi
+
+
+

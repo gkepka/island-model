@@ -13,4 +13,5 @@ rlibs/*
 *.stderr
 irace.Rdata
 
-logs/
+logs/*
+!logs/.gitkeep
