@@ -1,5 +1,5 @@
-deap==1.4.1
-opfunu==1.0.1
-ray==2.8.1
-networkx==3.2.1
-numpy~=1.26.2
+deap
+opfunu
+ray
+networkx
+numpy
