@@ -14,7 +14,7 @@
 #SBATCH --error="err.txt"
 
 TMP_DIR="/tmp/$USER/$SLURM_JOB_ID"
-mkdir "$TMP_DIR"
+mkdir -p "$TMP_DIR"
 
 
 source .venv/bin/activate
