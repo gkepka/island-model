@@ -13,7 +13,9 @@
 #SBATCH --output="log.txt"
 #SBATCH --error="err.txt"
 
-set -x
+TMP_DIR="/tmp/$USER/$SLURM_JOB_ID"
+mkdir "$TMP_DIR"
+
 
 source .venv/bin/activate
 
@@ -44,7 +46,7 @@ echo "IP Head: $ip_head"
 echo "Starting HEAD at $head_node"
 srun --nodes=1 --ntasks=1 -w "$head_node" \
     ray start --head --node-ip-address="$head_node_ip" --port=$port \
-    --num-cpus "${SLURM_CPUS_PER_TASK}" --block &
+    --num-cpus "${SLURM_CPUS_PER_TASK}" --temp-dir="$TMP_DIR" --block &
 
 # number of nodes other than the head node
 worker_num=$((SLURM_JOB_NUM_NODES - 1))
@@ -56,6 +58,5 @@ for ((i = 1; i <= worker_num; i++)); do
         ray start --address "$ip_head" --num-cpus "${SLURM_CPUS_PER_TASK}" --block &
     sleep 5
 done
-
 
 python -u src/main.py -f F92014 -m 0.01 -s 1 -c blend -a 0.5 -k 5
