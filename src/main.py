@@ -1,3 +1,4 @@
+import os
 import ray
 import time
 import numpy
@@ -93,7 +94,7 @@ if __name__ == "__main__":
     toolbox.register("diversity", get_l1_diversity)
 
     start_time = time.time()
-    ray.init(logging_level=logging.ERROR, log_to_driver=False)
+    ray.init(address=os.environ["ip_head"],logging_level=logging.ERROR, log_to_driver=False)
 
     #graph = nx.hypercube_graph(3)
     #graph = nx.convert_node_labels_to_integers(graph)
